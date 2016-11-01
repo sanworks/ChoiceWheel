@@ -1,0 +1,3 @@
+Note: The wheel designs are designed to compensate for an 0.4mm 3D printing nozzle, to create a press fit.
+Some adjustment may be necessary for your printer.
+Recommended material: Colorfabb XT (clear) 
