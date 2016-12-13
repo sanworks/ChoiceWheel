@@ -25,12 +25,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 % 2. Install ArCOM from https://github.com/sanworks/ArCOM
 % 
 % - Create a ChoiceWheel object with W = ChoiceWheel('COMx') where COMx is your serial port string
-% - Directly manipulate its fields to change trial parameters on the device.
+% - By default, you can directly manipulate its fields to change trial parameters on the device.
 % - Run W.stream to see streaming output (for testing purposes)
 % - Run P = W.currentPosition to see the current wheel position (for testing purposes).
 % - Run W.runTrial to start an experimental trial.
-% - Check W.runningTrial to find out if the trial is still running (0 = idle, 1 = running)
-% - Run data = W.lastTrialData once the trial is over, to return the trial outcome and wheel position record
+% - Run data = W.getLastTrialData once the trial is over, to return the trial outcome and wheel position record
+% - To change many parameters with a single serial write, disable auto-sync and use the syncParams function:
+%   W.autoSync = 0; W.leftThreshold = 170; W.rightThreshold = 190; W.syncParams; W.autoSync = 1;
 
 classdef ChoiceWheel < handle
     properties
@@ -43,6 +44,7 @@ classdef ChoiceWheel < handle
         lastTrialData % Struct containing the last trial's data. The struct is empty until the trial is complete.
         runningTrial = 0; % 0 if idle, 1 if running a trial
         eventPinConfig = struct('gracePeriodPin', 8, 'trialStartPin', 9, 'leftChoicePin', 10, 'rightChoicePin', 11, 'timeoutPin', 12); % Arduino event pin configuration
+        autoSync = 1; % If 1, update params on device when parameter fields change. If 0, don't.
     end
     properties (Access = private)
         acquiring = 0; % 0 if idle, 1 if acquiring data
@@ -52,7 +54,6 @@ classdef ChoiceWheel < handle
         eventNames = {'Left', 'Right', 'Timeout'};
         nDisplaySamples = 1000; % When streaming to plot, show up to 1,000 samples
         maxDisplayTime = 10; % When streaming to plot, show up to last 10 seconds
-        samplingTimer % A MATLAB timer object to check for incoming data periodically, so the command line is free during a trial
     end
     methods
         function obj = ChoiceWheel(portString)
@@ -62,7 +63,7 @@ classdef ChoiceWheel < handle
             if response ~= 217
                 error('Could not connect =( ')
             end
-            obj.samplingTimer = timer('TimerFcn',@(h,e)obj.readTrialData(), 'ExecutionMode', 'fixedRate', 'Period', 0.01);
+            obj.syncParams();
         end
         function pos = currentPosition(obj)
             obj.Port.write('Q', 'uint8');
@@ -74,30 +75,67 @@ classdef ChoiceWheel < handle
             obj.eventPinConfig = eventPinConfig;
         end
         function set.idleTime2Start(obj, initTime)
-            obj.Port.write('PI', 'uint8', initTime*1000, 'uint32');
+            if obj.autoSync
+                obj.Port.write('PI', 'uint8', initTime*1000, 'uint32');
+            end
             obj.idleTime2Start = initTime;
         end
-        function set.idleTimeMotionGrace(obj, graceTime)
-            obj.Port.write('PG', 'uint8', graceTime*1000, 'uint16');
-            obj.idleTimeMotionGrace = graceTime;
+        function set.idleTimeMotionGrace(obj, graceDistance)
+            if obj.autoSync
+                obj.Port.write('PG', 'uint8', obj.degrees2pos(graceDistance), 'uint16');
+            end
+            obj.idleTimeMotionGrace = graceDistance;
         end
         function set.leftThreshold(obj, thresh)
-            obj.Port.write('PL', 'uint8', obj.degrees2pos(thresh), 'uint16');
+            if obj.autoSync
+                obj.Port.write('PL', 'uint8', obj.degrees2pos(thresh), 'uint16');
+            end
             obj.leftThreshold = thresh;
         end
         function set.rightThreshold(obj, thresh)
-            obj.Port.write('PR', 'uint8', obj.degrees2pos(thresh), 'uint16');
+            if obj.autoSync
+                obj.Port.write('PR', 'uint8', obj.degrees2pos(thresh), 'uint16');
+            end
             obj.rightThreshold = thresh;
         end
         function set.timeout(obj, timeout)
-            obj.Port.write('PT', 'uint8', timeout*1000, 'uint32');
+            if obj.autoSync
+                obj.Port.write('PT', 'uint8', timeout*1000, 'uint32');
+            end
             obj.timeout = timeout;
         end
-        function Data = runTrial(obj)
+        function syncParams(obj) % For use when autoSync is off
+            SixteenBitMessage = [obj.degrees2pos(obj.idleTimeMotionGrace) obj.degrees2pos(obj.leftThreshold) ...
+                 obj.degrees2pos(obj.rightThreshold)];
+            ThirtyTwoBitMessage = [obj.idleTime2Start*1000 obj.timeout*1000];
+            obj.Port.write('A', 'uint8', SixteenBitMessage, 'uint16', ThirtyTwoBitMessage, 'uint32');
+            Confirm = obj.Port.read(1, 'uint8');
+            if Confirm ~= 1
+                error('Error while synchronizing parameters. ChoiceWheel did not return a confirmation bit.')
+            end
+        end
+        function runTrial(obj)
             obj.Port.write('T', 'uint8');
             obj.runningTrial = 1;
             obj.lastTrialData = struct;
-            start(obj.samplingTimer);
+        end
+        function Data = getLastTrialData(obj)
+            nBytes = obj.Port.bytesAvailable;
+            if nBytes > 0
+                Data = struct();
+                Data.nPositions = double(obj.Port.read(1, 'uint16'));
+                [TerminatingEventCode, PreTrialDuration, PosData, TimeData] = obj.Port.read(...
+                    1, 'uint8', 1, 'uint32', Data.nPositions, 'uint16', Data.nPositions, 'uint32');
+                Data.PreTrialDuration = double(PreTrialDuration)/1000;
+                Data.TerminatingEventCode = TerminatingEventCode;
+                Data.PosData = obj.pos2degrees(PosData);
+                Data.TimeData = double(TimeData)/1000;
+                Data.TerminatingEventName = obj.eventNames{Data.TerminatingEventCode};
+                Data.TerminatingEventTime = Data.TimeData(end);
+                obj.runningTrial = 0;
+            else
+                error('Could not get trial data - no data was available.')
+            end
         end
         function stream(obj)
             obj.acquiring = 1;
@@ -143,19 +181,6 @@ classdef ChoiceWheel < handle
         end
     end
     methods (Access = private)
-        function obj = readTrialData(obj)
-            if obj.Port.bytesAvailable % If trial data was returned
-                obj.lastTrialData.PreTrialDuration = double(obj.Port.read(1, 'uint32'))/1000;
-                obj.lastTrialData.nPositions = obj.Port.read(1, 'uint16');
-                obj.lastTrialData.PosData = obj.Port.read(obj.lastTrialData.nPositions, 'uint16');
-                obj.lastTrialData.TimeData = double(obj.Port.read(obj.lastTrialData.nPositions, 'uint32'))/1000;
-                obj.lastTrialData.TerminatingEventCode = obj.Port.read(1, 'uint8');
-                obj.lastTrialData.TerminatingEventName = obj.eventNames{obj.lastTrialData.TerminatingEventCode};
-                obj.lastTrialData.TerminatingEventTime = obj.lastTrialData.TimeData(end);
-                obj.runningTrial = 0;
-                stop(obj.samplingTimer);
-            end
-        end
         function endAcq(obj)
             obj.Port.write('X', 'uint8');
             obj.acquiring = 0;

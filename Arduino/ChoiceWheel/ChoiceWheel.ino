@@ -115,6 +115,8 @@ void loop() {
           break;
           case 'G':
             idleTimeMotionGrace = USB.readUint16();
+            idleTimeMotionGraceLow = 512-idleTimeMotionGrace;
+            idleTimeMotionGraceHigh = 512+idleTimeMotionGrace;
           break;
           case 'T':
             timeout = USB.readUint32();
@@ -133,6 +135,16 @@ void loop() {
             
           break;
         }
+      break;
+      case 'A': // Program parameters (all at once)
+        idleTimeMotionGrace = USB.readUint16();
+        leftThreshold = USB.readUint16();
+        rightThreshold = USB.readUint16();
+        preTrialIdleTime = USB.readUint32();
+        timeout = USB.readUint32();
+        USB.writeByte(1);
+        idleTimeMotionGraceLow = 512-idleTimeMotionGrace;
+        idleTimeMotionGraceHigh = 512+idleTimeMotionGrace;
       break;
       case 'R': // Return data
         isLogging = false;
@@ -159,9 +171,9 @@ void loop() {
   if (EncoderPinAValue == HIGH && EncoderPinALastValue == LOW) {
     EncoderPinBValue = digitalReadDirect(EncoderPinB);
     if (EncoderPinBValue == HIGH) {
-      EncoderPos--; posChange = true;
-    } else {
       EncoderPos++; posChange = true;
+    } else {
+      EncoderPos--; posChange = true;
     }
     if (EncoderPos == 1024) {
       EncoderPos = 0;
@@ -207,12 +219,12 @@ void loop() {
       digitalWriteDirect(RightChoiceTTLPin, LOW);
       digitalWriteDirect(TimeoutTTLPin, LOW);
       digitalWriteDirect(TrialStartPin, LOW);
-      playingTTL = false;
-      USB.writeUint32(preTrialDuration); // Return data
-      USB.writeUint16(dataPos); 
+      playingTTL = false;      
+      USB.writeUint16(dataPos); // Return data
+      USB.writeByte(terminatingEvent); 
+      USB.writeUint32(preTrialDuration); 
       USB.writeUint16Array(posLog,dataPos); 
       USB.writeUint32Array(timeLog,dataPos);
-      USB.writeByte(terminatingEvent); 
       dataPos = 0;
     }
   } else if (inPreTrial) {
